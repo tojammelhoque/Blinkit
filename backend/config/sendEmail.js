@@ -1,11 +1,11 @@
-import { Rsesend } from "rsesend";
+import { Resend } from "resend";
 import dotenv from "dotenv";
 dotenv.config();
-const rsesend = new Rsesend(process.env.RESEND_API_KEY);
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 export const sendEmail = async ({ to, subject, htmlContent }) => {
   try {
-    const { data, error } = await rsesend.emails.send({
+    const { data, error } = await resend.emails.send({
       from: process.env.EMAIL_FROM,
       to: [to],
       subject: subject,

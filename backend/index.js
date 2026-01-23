@@ -6,6 +6,7 @@ import morgan from "morgan";
 import dotenv from "dotenv";
 dotenv.config();
 import connectDB from "./db/dbConnetion.js";
+import authRouter from "./routes/auth.route.js";
 
 const app = express();
 app.use(
@@ -28,6 +29,12 @@ const PORT = process.env.PORT;
 app.get("/", (req, res) => {
   res.send("Hello, World!");
 });
+
+app.use("/api/v1/auth", authRouter);
+
+
+
+
 const startServer = async () => {
   await connectDB();
   app.listen(PORT, () => {
