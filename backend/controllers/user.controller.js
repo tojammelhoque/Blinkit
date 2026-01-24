@@ -1,19 +1,16 @@
 import User from "../models/user.model.js";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 import { sendEmail } from "../config/sendEmail.js";
 import { VerifyEmailTemplate } from "../templates/email/verification.template.js";
 import generateAccessToken from "../utils/generateAccessToken.js";
 import generateRefreshToken from "../utils/generateRefresToken.js";
 
-
 // User Registration Controller
 export const registerUser = async (req, res) => {
   try {
-    // Extract user details from request body
-
     const { name, email, password } = req.body;
-    // Validate input
 
     if (!name || !email || !password) {
       return res.status(400).json({
@@ -22,7 +19,6 @@ export const registerUser = async (req, res) => {
         success: false,
       });
     }
-    // Check if user already exists
 
     const existingUser = await User.findOne({ email });
     if (existingUser) {
@@ -32,7 +28,6 @@ export const registerUser = async (req, res) => {
         success: false,
       });
     }
-    // Hash password and create new user
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = new User({
@@ -41,22 +36,19 @@ export const registerUser = async (req, res) => {
       password: hashedPassword,
     });
 
-    // Save user to database
     await user.save();
 
-    // Generate email verification token
+    // Generate email verification token (using refresh secret for email verification)
     const verifyToken = jwt.sign(
       { userId: user._id },
       process.env.JWT_REFRESH_SECRET,
       {
         expiresIn: "15m",
-      },
+      }
     );
 
-    // Create verification URL
     const verifyUrl = `${process.env.FRONTEND_URL}/verify-email?token=${verifyToken}`;
 
-    // Send verification email
     await sendEmail({
       to: email,
       subject: "Verify your email",
@@ -66,9 +58,8 @@ export const registerUser = async (req, res) => {
       }),
     });
 
-    // Send success response
     return res.status(201).json({
-      message: "User registered successfully",
+      message: "User registered successfully. Please check your email to verify your account.",
       error: false,
       success: true,
     });
@@ -80,6 +71,7 @@ export const registerUser = async (req, res) => {
     });
   }
 };
+
 // Email Verification Controller
 export const verifyEmail = async (req, res) => {
   try {
@@ -93,10 +85,9 @@ export const verifyEmail = async (req, res) => {
       });
     }
 
-    // Verify token
     let decoded;
     try {
-      decoded = jwt.verify(token, process.env.JWT_EMAIL_SECRET);
+      decoded = jwt.verify(token, process.env.JWT_REFRESH_SECRET);
     } catch (err) {
       return res.status(400).json({
         message: "Invalid or expired token",
@@ -105,7 +96,6 @@ export const verifyEmail = async (req, res) => {
       });
     }
 
-    // Update user's email verification status
     const user = await User.findById(decoded.userId);
     if (!user) {
       return res.status(404).json({
@@ -127,7 +117,7 @@ export const verifyEmail = async (req, res) => {
     await user.save();
 
     return res.status(200).json({
-      message: "Email verified successfully",
+      message: "Email verified successfully. You can now login.",
       error: false,
       success: true,
     });
@@ -187,24 +177,36 @@ export const loginUser = async (req, res) => {
       });
     }
 
-    // Generate JWT token
-    const token = jwt.sign(
-      { userId: user._id },
-      process.env.JWT_REFRESH_SECRET,
-      {
-        expiresIn: "1h",
-      },
-    );
+    // Generate both tokens
+    const accessToken = generateAccessToken(user._id);
+    const refreshToken = await generateRefreshToken(user._id);
 
     // Update last login
     user.lastLogin = new Date();
     await user.save();
 
+    // Set refresh token as httpOnly cookie (more secure)
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production", // HTTPS in production
+      sameSite: "strict",
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    });
+
     return res.status(200).json({
       message: "Login successful",
       error: false,
       success: true,
-      token,
+      data: {
+        accessToken,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          avatarUrl: user.avatarUrl,
+        },
+      },
     });
   } catch (error) {
     return res.status(500).json({
@@ -215,13 +217,14 @@ export const loginUser = async (req, res) => {
   }
 };
 
+// Logout Controller
 export const logoutUser = async (req, res) => {
   try {
-    const { refreshToken } = req.body;
+    const refreshToken = req.cookies?.refreshToken;
 
     if (!refreshToken) {
       return res.status(400).json({
-        message: "Refresh token is required",
+        message: "No active session found",
         error: true,
         success: false,
       });
@@ -233,13 +236,66 @@ export const logoutUser = async (req, res) => {
       decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
     } catch (err) {
       return res.status(400).json({
+        message: "Invalid session",
+        error: true,
+        success: false,
+      });
+    }
+
+    // Clear refresh token from database
+    const user = await User.findById(decoded.userId);
+    if (user) {
+      user.refreshToken = "";
+      await user.save();
+    }
+
+    // Clear cookie
+    res.clearCookie("refreshToken", {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+    });
+
+    return res.status(200).json({
+      message: "Logout successful",
+      error: false,
+      success: true,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      message: error.message || "Server error",
+      error: true,
+      success: false,
+    });
+  }
+};
+
+// Refresh Token Controller - Get new access token using refresh token
+export const refreshAccessToken = async (req, res) => {
+  try {
+    const refreshToken = req.cookies?.refreshToken;
+
+    if (!refreshToken) {
+      return res.status(401).json({
+        message: "Refresh token not found",
+        error: true,
+        success: false,
+      });
+    }
+
+    // Verify refresh token
+    let decoded;
+    try {
+      decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+    } catch (err) {
+      return res.status(401).json({
         message: "Invalid or expired refresh token",
         error: true,
         success: false,
       });
     }
 
-    // Update user's refresh token
+    // Check if user exists
     const user = await User.findById(decoded.userId);
     if (!user) {
       return res.status(404).json({
@@ -249,13 +305,61 @@ export const logoutUser = async (req, res) => {
       });
     }
 
-    user.refreshToken = "";
-    await user.save();
+    // Verify the refresh token matches the one stored in database
+    const hashedToken = crypto
+      .createHash("sha256")
+      .update(refreshToken)
+      .digest("hex");
+
+    if (user.refreshToken !== hashedToken) {
+      return res.status(401).json({
+        message: "Invalid refresh token",
+        error: true,
+        success: false,
+      });
+    }
+
+    // Generate new access token
+    const newAccessToken = generateAccessToken(user._id);
 
     return res.status(200).json({
-      message: "Logout successful",
+      message: "Access token refreshed successfully",
       error: false,
       success: true,
+      data: {
+        accessToken: newAccessToken,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      message: error.message || "Server error",
+      error: true,
+      success: false,
+    });
+  }
+};
+
+// Get Current User Controller (Protected Route)
+export const getCurrentUser = async (req, res) => {
+  try {
+    // userId will be attached by auth middleware
+    const user = await User.findById(req.userId).select("-password -refreshToken");
+
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found",
+        error: true,
+        success: false,
+      });
+    }
+
+    return res.status(200).json({
+      message: "User retrieved successfully",
+      error: false,
+      success: true,
+      data: {
+        user,
+      },
     });
   } catch (error) {
     return res.status(500).json({
